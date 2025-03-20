@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables
+.env
+.env.*
+
+# Google Cloud credentials
+*credentials*.json
+*key*.json
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Streamlit
+.streamlit/
+
+# Audio files
+*.wav
+*.mp3
+*.flac
+*.ogg
+temp_audio*
+
+# Model files
+*.pt
+*.bin
+*.onnx
+*.model
+
+# Project specific files
+data/raw/
+data/processed/
+logs/
+models/
+temp/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+Dockerfile_original
