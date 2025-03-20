@@ -1,0 +1,10 @@
+[server]
+enableCORS = false
+enableXsrfProtection = false
+
+[python]
+# Path to your main script
+mainModule = "app/main.py"
+
+[browser]
+gatherUsageStats = false
