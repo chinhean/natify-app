@@ -18,3 +18,4 @@ sentencepiece==0.1.99
 google-cloud-storage==2.13.0
 pyaudio
 numpy
+gcsfs
