@@ -1,105 +1,147 @@
 """
 Audio recording and playback components for the Indonesian Pronunciation App.
+With automatic detection for cloud vs local environment.
 """
 
 import streamlit as st
-import sounddevice as sd
 import soundfile as sf
 import time
 import tempfile
 import numpy as np
 import matplotlib.pyplot as plt
 import librosa
+import os
 
-# Flag to track if streamlit-audiorec is available
-AUDIOREC_AVAILABLE = False
+# Detect if running on Streamlit Cloud
+# When on Cloud, servers usually listen on 0.0.0.0 address
+is_cloud = os.environ.get('STREAMLIT_SERVER_ADDRESS', '').startswith('0.0.0.0')
+# Additional cloud indicators
+is_cloud = is_cloud or 'STREAMLIT_CLOUD' in os.environ or 'STREAMLIT_SHARING' in os.environ
 
-# Try to import streamlit-audiorec but don't fail if it's not available
+# Import streamlit-audiorec if available
 try:
     from streamlit_audiorec import st_audiorec
-    AUDIOREC_AVAILABLE = True
+    audiorec_available = True
 except ImportError:
-    # Package not installed, browser recording won't be available
-    pass
+    audiorec_available = False
+
+# Import sounddevice only for local environments
+if not is_cloud:
+    try:
+        import sounddevice as sd
+    except ImportError:
+        sd = None
+else:
+    sd = None
 
 def list_audio_devices():
     """
     List all available audio input devices.
+    Will only work in local environments.
 
     Returns:
-        List of audio input devices
+        List of audio input devices or empty list if on cloud
     """
-    devices = sd.query_devices()
-    input_devices = []
+    if is_cloud or sd is None:
+        return []
 
-    for i, device in enumerate(devices):
-        if device['max_input_channels'] > 0:
-            # Format device info for display
-            input_devices.append({
-                'id': i,
-                'name': device['name'],
-                'channels': device['max_input_channels']
-            })
+    try:
+        devices = sd.query_devices()
+        input_devices = []
 
-    return input_devices
+        for i, device in enumerate(devices):
+            if device['max_input_channels'] > 0:
+                # Format device info for display
+                input_devices.append({
+                    'id': i,
+                    'name': device['name'],
+                    'channels': device['max_input_channels']
+                })
+
+        return input_devices
+    except Exception as e:
+        st.error(f"Error listing audio devices: {e}")
+        return []
 
 def record_audio(duration=3, sample_rate=16000):
     """
-    Record audio from the user's microphone with selected device
+    Smart record audio function that automatically chooses the appropriate method.
+    In local environments, uses sounddevice to access the microphone directly.
+    In cloud environments, uses streamlit-audiorec for browser-based recording.
+
+    Args:
+        duration: Recording duration in seconds (used only for device recording)
+        sample_rate: Sample rate in Hz
+
+    Returns:
+        String: Path to the recorded audio file or None if error
+    """
+    # For cloud environments, use browser-based recording
+    if is_cloud:
+        if not audiorec_available:
+            st.error("Cloud environment detected but streamlit-audiorec is not installed.")
+            st.info("Please add 'streamlit-audiorec==0.1.3' to your requirements.txt file.")
+            return None
+
+        return record_audio_browser_internal()
+
+    # For local environments, use device-based recording
+    else:
+        if sd is None:
+            st.error("sounddevice module is not available for local recording.")
+            return None
+
+        return record_audio_device_internal(duration, sample_rate)
+
+def record_audio_device_internal(duration=3, sample_rate=16000):
+    """
+    Internal function to record audio from the user's microphone with selected device.
+    Works only in local environments.
 
     Args:
         duration: Recording duration in seconds
         sample_rate: Sample rate in Hz
 
     Returns:
-        String: Path to the recorded audio file
+        String: Path to the recorded audio file or None if error
     """
-    # Get the selected input device ID from session state
-    device_id = st.session_state.get('input_device_id', None)
+    try:
+        # Get the selected input device ID from session state
+        device_id = st.session_state.get('input_device_id', None)
 
-    st.write("🎙️ Recording... Speak now!")
+        st.write("🎙️ Recording... Speak now!")
 
-    # Start recording with the selected device
-    recording = sd.rec(
-        int(duration * sample_rate),
-        samplerate=sample_rate,
-        channels=1,
-        device=device_id  # Use the selected device
-    )
+        # Start recording with the selected device
+        recording = sd.rec(
+            int(duration * sample_rate),
+            samplerate=sample_rate,
+            channels=1,
+            device=device_id  # Use the selected device
+        )
 
-    progress_bar = st.progress(0)
-    for i in range(100):
-        time.sleep(duration/100)
-        progress_bar.progress(i + 1)
-    sd.wait()
-    progress_bar.empty()
+        progress_bar = st.progress(0)
+        for i in range(100):
+            time.sleep(duration/100)
+            progress_bar.progress(i + 1)
+        sd.wait()
+        progress_bar.empty()
 
-    # Save the recording to a temporary file
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-    sf.write(temp_file.name, recording, sample_rate)
-    return temp_file.name
+        # Save the recording to a temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        sf.write(temp_file.name, recording, sample_rate)
+        return temp_file.name
+    except Exception as e:
+        st.error(f"Error recording audio: {e}")
+        return None
 
-def is_browser_recording_available():
+def record_audio_browser_internal():
     """
-    Check if browser-based recording is available
-
-    Returns:
-        Boolean: True if streamlit-audiorec is available
-    """
-    return AUDIOREC_AVAILABLE
-
-def record_audio_browser():
-    """
-    Record audio using the browser's microphone via streamlit-audiorec
+    Internal function to record audio using the browser's microphone via streamlit-audiorec.
+    Works in all environments, including cloud.
 
     Returns:
         String: Path to the recorded audio file or None if no recording
     """
-    if not AUDIOREC_AVAILABLE:
-        st.error("Browser recording is not available. Please install streamlit-audiorec package.")
-        st.code("pip install streamlit-audiorec")
-        return None
-
     st.write("🎙️ Click below to record your voice")
 
     # Use the streamlit-audiorec component to record audio
