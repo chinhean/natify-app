@@ -26,13 +26,12 @@ except ImportError:
     audiorec_available = False
 
 # Import sounddevice only for local environments
+sd = None
 if not is_cloud:
     try:
         import sounddevice as sd
     except ImportError:
-        sd = None
-else:
-    sd = None
+        pass
 
 def list_audio_devices():
     """
@@ -76,22 +75,31 @@ def record_audio(duration=3, sample_rate=16000):
     Returns:
         String: Path to the recorded audio file or None if error
     """
-    # For cloud environments, use browser-based recording
-    if is_cloud:
-        if not audiorec_available:
-            st.error("Cloud environment detected but streamlit-audiorec is not installed.")
-            st.info("Please add 'streamlit-audiorec==0.1.3' to your requirements.txt file.")
-            return None
-
+    # If streamlit-audiorec is available, always use it as first choice
+    # This avoids device issues with sounddevice
+    if audiorec_available:
         return record_audio_browser_internal()
 
-    # For local environments, use device-based recording
-    else:
-        if sd is None:
-            st.error("sounddevice module is not available for local recording.")
+    # Fall back to sounddevice only if audiorec isn't available and we're not in the cloud
+    elif not is_cloud and sd is not None:
+        try:
+            return record_audio_device_internal(duration, sample_rate)
+        except Exception as e:
+            st.error(f"Error recording audio: {e}")
+            st.info("Installing streamlit-audiorec is recommended for more reliable recording.")
             return None
 
-        return record_audio_device_internal(duration, sample_rate)
+    # If we're in the cloud but audiorec isn't available
+    elif is_cloud:
+        st.error("Cloud environment detected but streamlit-audiorec is not installed.")
+        st.info("Please add 'streamlit-audiorec==0.1.3' to your requirements.txt file.")
+        return None
+
+    # If sounddevice isn't available and we're not in the cloud
+    else:
+        st.error("No audio recording method is available.")
+        st.info("Please install 'streamlit-audiorec' package for browser-based recording.")
+        return None
 
 def record_audio_device_internal(duration=3, sample_rate=16000):
     """
@@ -105,34 +113,39 @@ def record_audio_device_internal(duration=3, sample_rate=16000):
     Returns:
         String: Path to the recorded audio file or None if error
     """
-    try:
-        # Get the selected input device ID from session state
-        device_id = st.session_state.get('input_device_id', None)
+    # Get the selected input device ID from session state or find a valid device
+    device_id = st.session_state.get('input_device_id', None)
 
-        st.write("🎙️ Recording... Speak now!")
+    # If no device is explicitly selected, try to find a working input device
+    if device_id is None:
+        input_devices = list_audio_devices()
+        if input_devices:
+            device_id = input_devices[0]['id']  # Use the first available input device
+        else:
+            # No input devices found, cannot proceed
+            raise Exception("No audio input devices found. Please try browser recording.")
 
-        # Start recording with the selected device
-        recording = sd.rec(
-            int(duration * sample_rate),
-            samplerate=sample_rate,
-            channels=1,
-            device=device_id  # Use the selected device
-        )
+    st.write("🎙️ Recording... Speak now!")
 
-        progress_bar = st.progress(0)
-        for i in range(100):
-            time.sleep(duration/100)
-            progress_bar.progress(i + 1)
-        sd.wait()
-        progress_bar.empty()
+    # Start recording with the selected device
+    recording = sd.rec(
+        int(duration * sample_rate),
+        samplerate=sample_rate,
+        channels=1,
+        device=device_id  # Use the selected or first available device
+    )
 
-        # Save the recording to a temporary file
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-        sf.write(temp_file.name, recording, sample_rate)
-        return temp_file.name
-    except Exception as e:
-        st.error(f"Error recording audio: {e}")
-        return None
+    progress_bar = st.progress(0)
+    for i in range(100):
+        time.sleep(duration/100)
+        progress_bar.progress(i + 1)
+    sd.wait()
+    progress_bar.empty()
+
+    # Save the recording to a temporary file
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+    sf.write(temp_file.name, recording, sample_rate)
+    return temp_file.name
 
 def record_audio_browser_internal():
     """
