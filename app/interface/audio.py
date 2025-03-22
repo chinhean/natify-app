@@ -11,6 +11,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 import librosa
 
+# Flag to track if streamlit-audiorec is available
+AUDIOREC_AVAILABLE = False
+
+# Try to import streamlit-audiorec but don't fail if it's not available
+try:
+    from streamlit_audiorec import st_audiorec
+    AUDIOREC_AVAILABLE = True
+except ImportError:
+    # Package not installed, browser recording won't be available
+    pass
+
 def list_audio_devices():
     """
     List all available audio input devices.
@@ -67,6 +78,52 @@ def record_audio(duration=3, sample_rate=16000):
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
     sf.write(temp_file.name, recording, sample_rate)
     return temp_file.name
+
+def is_browser_recording_available():
+    """
+    Check if browser-based recording is available
+
+    Returns:
+        Boolean: True if streamlit-audiorec is available
+    """
+    return AUDIOREC_AVAILABLE
+
+def record_audio_browser():
+    """
+    Record audio using the browser's microphone via streamlit-audiorec
+
+    Returns:
+        String: Path to the recorded audio file or None if no recording
+    """
+    if not AUDIOREC_AVAILABLE:
+        st.error("Browser recording is not available. Please install streamlit-audiorec package.")
+        st.code("pip install streamlit-audiorec")
+        return None
+
+    st.write("🎙️ Click below to record your voice")
+
+    # Use the streamlit-audiorec component to record audio
+    audio_bytes = st_audiorec()
+
+    # If audio was recorded, save it to a file
+    if audio_bytes is not None:
+        # Save the recording to a temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        temp_file.write(audio_bytes)
+        temp_file.close()
+
+        # Normalize to expected format (16kHz)
+        try:
+            y, sr = librosa.load(temp_file.name)
+            if sr != 16000:
+                y = librosa.resample(y, orig_sr=sr, target_sr=16000)
+            sf.write(temp_file.name, y, 16000)
+        except Exception as e:
+            st.error(f"Error processing audio: {e}")
+
+        return temp_file.name
+
+    return None
 
 def plot_waveform(audio_path):
     """
