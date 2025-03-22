@@ -7,7 +7,9 @@ import os
 import pandas as pd
 import io
 import tempfile
+import json
 from google.cloud import storage
+from google.oauth2 import service_account
 
 def initialize_gcs_client(bucket_name=None):
     """
@@ -20,13 +22,17 @@ def initialize_gcs_client(bucket_name=None):
         GCS client object or None if initialization fails
     """
     try:
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"]
+)
         # Create GCS client with application default credentials
-        client = storage.Client()
+        client = storage.Client(credentials=credentials, project=credentials.project_id)
 
         if bucket_name:
             # Try to access the bucket to validate connection
             try:
                 bucket = client.bucket(bucket_name)
+                print(f"Accessing GCS bucket '{bucket_name}'") # Print to console
                 # Test if bucket exists by listing a small number of blobs
                 next(bucket.list_blobs(max_results=1), None)
                 st.session_state.gcs_bucket_name = bucket_name
@@ -105,6 +111,8 @@ def load_sentences_dataframe_from_gcs(bucket_name, tsv_path):
     Returns:
         DataFrame with sentences and audio information
     """
+    gcp_credentials = dict(st.secrets["gcp_service_account"])
+
     try:
         # Check if GCS client is initialized
         if st.session_state.gcs_client is None:
@@ -128,10 +136,12 @@ def load_sentences_dataframe_from_gcs(bucket_name, tsv_path):
         # Determine if file is TSV or CSV based on content
         if '\t' in tsv_content.split('\n')[0]:
             # Read as TSV
-            df = pd.read_csv(io.StringIO(tsv_content), sep='\t')
+            # df = pd.read_csv(io.StringIO(tsv_content), sep='\t', storage_options={"token": gcp_credentials})
+            df = pd.read_csv("gs://natify/final_audio/filtered_results.tsv", sep='\t', storage_options={"token": gcp_credentials})
         else:
             # Read as CSV
-            df = pd.read_csv(io.StringIO(tsv_content))
+            # df = pd.read_csv(io.StringIO(tsv_content), storage_options={"token": gcp_credentials})
+            df = pd.read_csv("gs://natify/final_audio/filtered_results.tsv", storage_options={"token": gcp_credentials})
 
         # Make sure required columns exist
         required_columns = ['sentence', 'path']
