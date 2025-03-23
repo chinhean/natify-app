@@ -1,8 +1,10 @@
 """
 Audio recording and playback components for the Indonesian Pronunciation App.
+Using Streamlit's built-in audio recorder with fallback to sounddevice.
 """
 
 import streamlit as st
+import sounddevice as sd
 import soundfile as sf
 import time
 import tempfile
@@ -10,31 +12,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 import librosa
 import os
-
-# Try importing sounddevice first - will work locally
-try:
-    import sounddevice as sd
-    sounddevice_available = True
-except ImportError:
-    sounddevice_available = False
-
-# Try importing streamlit-audiorec next - should work on cloud
-try:
-    from streamlit_audiorec import st_audiorec
-    audiorec_available = True
-except ImportError:
-    audiorec_available = False
+import traceback
+import importlib
+import sys
 
 def list_audio_devices():
     """
     List all available audio input devices.
+    In cloud deployment, this will return a mock device list.
 
     Returns:
         List of audio input devices
     """
-    if not sounddevice_available:
-        return []
-
     try:
         devices = sd.query_devices()
         input_devices = []
@@ -47,14 +36,28 @@ def list_audio_devices():
                     'name': device['name'],
                     'channels': device['max_input_channels']
                 })
+    except Exception as e:
+        # If sounddevice fails, return a mock device
+        input_devices = [{
+            'id': 0,
+            'name': 'Default Microphone',
+            'channels': 1
+        }]
 
-        return input_devices
-    except Exception:
-        return []
+    # If no devices found, add a default option
+    if not input_devices:
+        input_devices = [{
+            'id': 0,
+            'name': 'Default Microphone',
+            'channels': 1
+        }]
+
+    return input_devices
 
 def record_audio(duration=3, sample_rate=16000):
     """
-    Record audio using the available method.
+    Record audio using Streamlit's built-in audio_recorder when available,
+    with fallback to sounddevice.
 
     Args:
         duration: Recording duration in seconds
@@ -63,64 +66,218 @@ def record_audio(duration=3, sample_rate=16000):
     Returns:
         String: Path to the recorded audio file
     """
-    # First try streamlit-audiorec if available
-    if audiorec_available:
-        st.write("🎙️ Click below to record your voice")
-        audio_bytes = st_audiorec()
-        if audio_bytes is not None:
-            # Save recording to file
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-            temp_file.write(audio_bytes)
-            temp_file.close()
+    # Try to use Streamlit's built-in audio recorder first
+    has_audio_recorder = hasattr(st, 'audio_recorder')
 
-            # Normalize format
-            try:
-                y, sr = librosa.load(temp_file.name)
-                if sr != 16000:
-                    y = librosa.resample(y, orig_sr=sr, target_sr=16000)
-                sf.write(temp_file.name, y, 16000)
-            except Exception as e:
-                st.error(f"Error processing audio: {e}")
-
-            return temp_file.name
-        return None
-
-    # Fall back to sounddevice if streamlit-audiorec not available
-    elif sounddevice_available:
+    if has_audio_recorder:
         try:
-            # Get the selected input device ID
-            device_id = st.session_state.get('input_device_id', None)
+            return _record_audio_streamlit(duration, sample_rate)
+        except Exception as e:
+            st.warning(f"Streamlit audio recorder failed: {str(e)}. Falling back to sounddevice.")
+            return _record_audio_sounddevice(duration, sample_rate)
+    else:
+        st.info("Using native recording function. For cloud deployment, consider upgrading Streamlit.")
+        return _record_audio_sounddevice(duration, sample_rate)
 
-            st.write("🎙️ Recording... Speak now!")
+def _record_audio_streamlit(duration=3, sample_rate=16000):
+    """
+    Record audio using Streamlit's built-in audio_recorder.
 
-            # Start recording
+    Args:
+        duration: Recording duration in seconds
+        sample_rate: Sample rate in Hz
+
+    Returns:
+        String: Path to the recorded audio file
+    """
+    # Create UI elements
+    status_container = st.empty()
+    status_container.info(f"Please record for approximately {duration} seconds.")
+
+    # Use Streamlit's audio recorder
+    audio_bytes = st.audio_recorder(pause_threshold=duration+1.0)
+
+    if audio_bytes is not None:
+        status_container.success("Recording received. Processing audio...")
+
+        # Save audio bytes to a temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        temp_file.write(audio_bytes)
+        temp_file.close()
+
+        # Process the audio to ensure correct format and duration
+        processed_file = _process_audio_file(temp_file.name, duration, sample_rate)
+
+        # Clean up original temp file if needed
+        if processed_file != temp_file.name and os.path.exists(temp_file.name):
+            try:
+                os.unlink(temp_file.name)
+            except:
+                pass
+
+        status_container.empty()
+        return processed_file
+    else:
+        status_container.warning("No audio recorded. Please try again or use alternative method.")
+        status_container.empty()
+        # Fall back to sounddevice if no audio was captured
+        return _record_audio_sounddevice(duration, sample_rate)
+
+def _record_audio_sounddevice(duration=3, sample_rate=16000):
+    """
+    Record audio using sounddevice with improved error handling.
+
+    Args:
+        duration: Recording duration in seconds
+        sample_rate: Sample rate in Hz
+
+    Returns:
+        String: Path to the recorded audio file
+    """
+    # Ensure duration is a reasonable value
+    duration = max(1, min(10, duration))  # Between 1 and 10 seconds
+
+    # Create UI elements
+    record_container = st.empty()
+    progress_container = st.empty()
+    status_container = st.empty()
+
+    try:
+        # Get the selected input device ID from session state
+        device_id = st.session_state.get('input_device_id', None)
+
+        # Get device list and try to validate the selected device
+        devices = list_audio_devices()
+        valid_device = False
+        device_name = "Default"
+
+        for device in devices:
+            if device['id'] == device_id:
+                valid_device = True
+                device_name = device['name']
+                break
+
+        if not valid_device:
+            status_container.warning("Selected audio device not found, using default.")
+            device_id = None
+
+        # Display recording status
+        record_container.markdown(f"🎙️ Recording from **{device_name}**... Please speak clearly!")
+
+        # Initialize progress bar
+        progress_bar = progress_container.progress(0)
+
+        # Start recording with exception handling
+        try:
+            # First check if sounddevice can initialize
+            sd.check_input_settings(
+                device=device_id,
+                channels=1,
+                samplerate=sample_rate,
+                dtype='float32'
+            )
+
+            # Start the recording
             recording = sd.rec(
                 int(duration * sample_rate),
                 samplerate=sample_rate,
                 channels=1,
-                device=device_id
+                device=device_id  # Use the selected device or default
             )
 
-            progress_bar = st.progress(0)
+            # Update progress bar
             for i in range(100):
                 time.sleep(duration/100)
                 progress_bar.progress(i + 1)
-            sd.wait()
-            progress_bar.empty()
+                remaining = duration - (i+1) * duration/100
+                status_container.text(f"Recording... {remaining:.1f} seconds remaining.")
 
-            # Save to file
+            # Ensure recording is complete
+            sd.wait()
+            status_container.success("Recording completed successfully!")
+
+            # Check if recording contains actual sound data
+            if np.max(np.abs(recording)) < 0.01:
+                status_container.warning("Recording seems too quiet. Please speak louder next time.")
+
+            # Save the recording to a temporary file
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
             sf.write(temp_file.name, recording, sample_rate)
             return temp_file.name
-        except Exception as e:
-            st.error(f"Error recording with sounddevice: {e}")
-            return None
 
-    # If no recording method is available
-    else:
-        st.error("No audio recording method is available.")
-        st.info("Please add 'streamlit-audiorec==0.1.3' to your requirements.txt file.")
-        return None
+        except Exception as e:
+            # Handle recording errors
+            error_msg = f"Error during recording: {str(e)}"
+            status_container.error(error_msg)
+
+            # Create a silent audio file as fallback
+            status_container.warning("Creating silent audio as fallback...")
+            return _create_silent_audio(duration, sample_rate)
+
+    except Exception as e:
+        # Handle any other errors
+        status_container.error(f"Unexpected error: {str(e)}")
+        traceback.print_exc()
+        return _create_silent_audio(duration, sample_rate)
+    finally:
+        # Clean up UI elements
+        time.sleep(1)
+        record_container.empty()
+        progress_container.empty()
+        status_container.empty()
+
+def _process_audio_file(audio_path, target_duration, target_sr=16000):
+    """
+    Process an audio file to ensure it meets the required specifications:
+    - Has the correct sample rate
+    - Is approximately the target duration (trimming or padding as needed)
+    - Is in mono format
+
+    Args:
+        audio_path: Path to the audio file to process
+        target_duration: Target duration in seconds
+        target_sr: Target sample rate
+
+    Returns:
+        Path to the processed audio file
+    """
+    try:
+        # Load the audio
+        y, sr = librosa.load(audio_path, sr=None, mono=True)
+
+        # Resample if needed
+        if sr != target_sr:
+            y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+
+        # Calculate current duration
+        current_duration = len(y) / target_sr
+
+        # Adjust duration
+        if current_duration > target_duration * 1.5:  # If much longer, trim to exact duration
+            # Trim to exact target duration
+            y = y[:int(target_duration * target_sr)]
+        elif current_duration < target_duration * 0.5:  # If much shorter, pad with silence
+            # Pad with silence to reach target duration
+            padding = np.zeros(int(target_sr * target_duration) - len(y))
+            y = np.concatenate((y, padding))
+
+        # Save to a new temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        temp_file.close()
+        sf.write(temp_file.name, y, target_sr)
+
+        return temp_file.name
+    except Exception as e:
+        st.error(f"Error processing audio: {str(e)}")
+        # Return the original file if processing fails
+        return audio_path
+
+def _create_silent_audio(duration, sample_rate):
+    """Create a silent audio file as a fallback"""
+    silent_audio = np.zeros(int(sample_rate * duration))
+    silent_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+    sf.write(silent_file.name, silent_audio, sample_rate)
+    return silent_file.name
 
 def plot_waveform(audio_path):
     """
