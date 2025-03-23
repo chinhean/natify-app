@@ -81,7 +81,7 @@ def record_audio(duration=3, sample_rate=16000):
 
 def _record_audio_streamlit(duration=3, sample_rate=16000):
     """
-    Record audio using Streamlit's built-in audio_recorder.
+    Record audio using Streamlit's built-in audio_recorder with enhanced error handling for cloud environments.
 
     Args:
         duration: Recording duration in seconds
@@ -90,38 +90,79 @@ def _record_audio_streamlit(duration=3, sample_rate=16000):
     Returns:
         String: Path to the recorded audio file
     """
-    # Create UI elements
-    status_container = st.empty()
-    status_container.info(f"Please record for approximately {duration} seconds.")
+    try:
+        # Create UI elements
+        status_container = st.empty()
+        status_container.info(f"Please record for approximately {duration} seconds.")
 
-    # Use Streamlit's audio recorder
-    audio_bytes = st.audio_recorder(pause_threshold=duration+1.0)
+        # Use Streamlit's audio recorder with safe parameters for cloud
+        try:
+            audio_bytes = st.audio_recorder(pause_threshold=duration+1.0)
+        except Exception as e:
+            status_container.error(f"Error initializing audio recorder: {str(e)}")
+            status_container.empty()
+            return _create_silent_audio(duration, sample_rate)
 
-    if audio_bytes is not None:
-        status_container.success("Recording received. Processing audio...")
-
-        # Save audio bytes to a temporary file
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-        temp_file.write(audio_bytes)
-        temp_file.close()
-
-        # Process the audio to ensure correct format and duration
-        processed_file = _process_audio_file(temp_file.name, duration, sample_rate)
-
-        # Clean up original temp file if needed
-        if processed_file != temp_file.name and os.path.exists(temp_file.name):
+        if audio_bytes is not None and len(audio_bytes) > 0:
             try:
-                os.unlink(temp_file.name)
-            except:
-                pass
+                status_container.success("Recording received. Processing audio...")
 
-        status_container.empty()
-        return processed_file
-    else:
-        status_container.warning("No audio recorded. Please try again or use alternative method.")
-        status_container.empty()
-        # Fall back to sounddevice if no audio was captured
-        return _record_audio_sounddevice(duration, sample_rate)
+                # Safer approach: first save the audio bytes to a temporary file
+                try:
+                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+                    temp_file.write(audio_bytes)
+                    temp_file.close()
+                except Exception as e:
+                    status_container.error(f"Failed to save recorded audio: {str(e)}")
+                    status_container.empty()
+                    return _create_silent_audio(duration, sample_rate)
+
+                # Check if the file exists and has content
+                if not os.path.exists(temp_file.name) or os.path.getsize(temp_file.name) == 0:
+                    status_container.warning("Recorded file is empty or missing.")
+                    status_container.empty()
+                    return _create_silent_audio(duration, sample_rate)
+
+                # Process the audio defensively with try/except
+                try:
+                    processed_file = _process_audio_file(temp_file.name, duration, sample_rate)
+                except Exception as e:
+                    status_container.error(f"Error processing audio: {str(e)}")
+                    # Return the original file if processing fails
+                    processed_file = temp_file.name
+
+                # Check the processed file
+                if not os.path.exists(processed_file):
+                    status_container.error("Processed audio file missing.")
+                    status_container.empty()
+                    return _create_silent_audio(duration, sample_rate)
+
+                # Clean up original temp file if needed
+                if processed_file != temp_file.name and os.path.exists(temp_file.name):
+                    try:
+                        os.unlink(temp_file.name)
+                    except:
+                        pass
+
+                status_container.empty()
+                return processed_file
+
+            except Exception as e:
+                status_container.error(f"Unexpected error processing recording: {str(e)}")
+                status_container.empty()
+                return _create_silent_audio(duration, sample_rate)
+        else:
+            status_container.warning("No audio recorded. Falling back to alternative method.")
+            status_container.empty()
+            # Try sounddevice as fallback
+            try:
+                return _record_audio_sounddevice(duration, sample_rate)
+            except Exception as e:
+                status_container.error(f"Fallback recording also failed: {str(e)}")
+                return _create_silent_audio(duration, sample_rate)
+    except Exception as e:
+        st.error(f"Critical error in audio recording: {str(e)}")
+        return _create_silent_audio(duration, sample_rate)
 
 def _record_audio_sounddevice(duration=3, sample_rate=16000):
     """
@@ -228,10 +269,8 @@ def _record_audio_sounddevice(duration=3, sample_rate=16000):
 
 def _process_audio_file(audio_path, target_duration, target_sr=16000):
     """
-    Process an audio file to ensure it meets the required specifications:
-    - Has the correct sample rate
-    - Is approximately the target duration (trimming or padding as needed)
-    - Is in mono format
+    Process an audio file to ensure it meets the required specifications,
+    with enhanced error handling for cloud environments.
 
     Args:
         audio_path: Path to the audio file to process
@@ -242,35 +281,84 @@ def _process_audio_file(audio_path, target_duration, target_sr=16000):
         Path to the processed audio file
     """
     try:
-        # Load the audio
-        y, sr = librosa.load(audio_path, sr=None, mono=True)
+        # First check if file exists and has content
+        if not os.path.exists(audio_path):
+            st.error(f"Audio file not found: {audio_path}")
+            return _create_silent_audio(target_duration, target_sr)
+
+        if os.path.getsize(audio_path) == 0:
+            st.error(f"Audio file is empty: {audio_path}")
+            return _create_silent_audio(target_duration, target_sr)
+
+        # Try loading with scipy first (more reliable for WAV files)
+        try:
+            # Try using soundfile first (faster and more reliable for WAV)
+            audio_data, orig_sr = sf.read(audio_path)
+            # Convert to mono if stereo
+            if len(audio_data.shape) > 1 and audio_data.shape[1] > 1:
+                audio_data = np.mean(audio_data, axis=1)
+        except Exception as sf_error:
+            # Fall back to librosa if soundfile fails
+            try:
+                audio_data, orig_sr = librosa.load(audio_path, sr=None, mono=True)
+            except Exception as librosa_error:
+                st.error(f"Failed to read audio with both soundfile ({sf_error}) and librosa ({librosa_error})")
+                return _create_silent_audio(target_duration, target_sr)
+
+        # Validate audio data
+        if len(audio_data) == 0:
+            st.error("Loaded audio has no samples")
+            return _create_silent_audio(target_duration, target_sr)
+
+        # Ensure we have valid sample rate
+        if not orig_sr or orig_sr <= 0:
+            orig_sr = target_sr
 
         # Resample if needed
-        if sr != target_sr:
-            y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
+        if orig_sr != target_sr:
+            try:
+                audio_data = librosa.resample(audio_data, orig_sr=orig_sr, target_sr=target_sr)
+            except Exception as e:
+                st.error(f"Error resampling audio: {str(e)}")
+                # Continue with original audio data
 
         # Calculate current duration
-        current_duration = len(y) / target_sr
+        current_duration = len(audio_data) / target_sr
 
         # Adjust duration
         if current_duration > target_duration * 1.5:  # If much longer, trim to exact duration
             # Trim to exact target duration
-            y = y[:int(target_duration * target_sr)]
+            audio_data = audio_data[:int(target_duration * target_sr)]
         elif current_duration < target_duration * 0.5:  # If much shorter, pad with silence
             # Pad with silence to reach target duration
-            padding = np.zeros(int(target_sr * target_duration) - len(y))
-            y = np.concatenate((y, padding))
+            padding = np.zeros(int(target_sr * target_duration) - len(audio_data))
+            audio_data = np.concatenate((audio_data, padding))
 
-        # Save to a new temporary file
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-        temp_file.close()
-        sf.write(temp_file.name, y, target_sr)
+        # Normalize audio (prevent extreme volumes)
+        max_amp = np.max(np.abs(audio_data))
+        if max_amp > 0:
+            audio_data = audio_data / max_amp * 0.9  # Normalize to 90% of maximum
 
-        return temp_file.name
+        # Save to a new temporary file with error handling
+        try:
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+            temp_file.close()
+            sf.write(temp_file.name, audio_data, target_sr)
+
+            # Verify the file was created successfully
+            if not os.path.exists(temp_file.name) or os.path.getsize(temp_file.name) == 0:
+                st.error("Failed to save processed audio")
+                return _create_silent_audio(target_duration, target_sr)
+
+            return temp_file.name
+        except Exception as e:
+            st.error(f"Error saving processed audio: {str(e)}")
+            return _create_silent_audio(target_duration, target_sr)
+
     except Exception as e:
-        st.error(f"Error processing audio: {str(e)}")
-        # Return the original file if processing fails
-        return audio_path
+        st.error(f"Unexpected error processing audio: {str(e)}")
+        # Return a silent audio file if processing completely fails
+        return _create_silent_audio(target_duration, target_sr)
 
 def _create_silent_audio(duration, sample_rate):
     """Create a silent audio file as a fallback"""
